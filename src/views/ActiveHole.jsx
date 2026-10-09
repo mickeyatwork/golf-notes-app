@@ -320,6 +320,16 @@ export default function ActiveHole({
 
   // Collect all holes played so far when finishing round
   const handleSaveAndCompleteRound = () => {
+    try {
+      // Ensure current hole's active scores and shots are flushed to storage
+      if (activeRound?.id) {
+        const currentKey = `round_${activeRound.id}_hole_${currentHole}`;
+        localStorage.setItem(currentKey, JSON.stringify(scores));
+      }
+    } catch (e) {
+      console.warn('Could not sync current hole before round finish:', e);
+    }
+
     const holesPlayed = [];
     let grossTotal = 0;
 
@@ -361,10 +371,12 @@ export default function ActiveHole({
       holes: holesPlayed,
     };
 
+    setShowEndModal(false);
+
     if (onFinishRound) {
       onFinishRound(completed);
     } else {
-      setActiveRound(null);
+      if (setActiveRound) setActiveRound(null);
       navigate('dashboard');
     }
   };
