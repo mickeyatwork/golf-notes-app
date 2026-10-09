@@ -14,6 +14,7 @@ import AnalyticsDashboard from './views/AnalyticsDashboard';
 import SettingsView from './views/SettingsView';
 import { Icons } from './components/Icons';
 import { saveCompletedRound, fetchUserRounds, deleteRound } from './services/roundService';
+import { ensureValidUuid } from './services/courseService';
 
 export default function App() {
   const [currentView, setCurrentView] = useState('dashboard');
