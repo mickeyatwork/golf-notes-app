@@ -59,21 +59,24 @@ golf-notes-app/
 │   ├── components/         # Shared components (e.g., Icons)
 │   ├── data/               # Default mock courses, users, and bag fixtures
 │   ├── hooks/              # Custom hooks (e.g. useOfflineScore)
-│   ├── lib/                # db client initialization
+│   ├── lib/                # db client initialization (Supabase)
+│   ├── services/           # External API & persistence (courseService.js)
+│   ├── utils/              # Geodesic math & GPS helpers (geo.js)
 │   ├── views/              # Main app views:
-│   │   ├── ActiveHole.jsx  # Live scoring and shot logging interface
-│   │   ├── Analysis.jsx    # Round insights and club carry stats
+│   │   ├── ActiveHole.jsx  # Live scoring, GPS green distance & 2-tap shot tracking
+│   │   ├── Analysis.jsx    # Round recap, hole breakdown & single-round insights
+│   │   ├── AnalyticsDashboard.jsx # Global gameplay stats, par leaks & bag averages
 │   │   ├── AuthView.jsx    # Sign in, registration, and password recovery
 │   │   ├── Dashboard.jsx   # Welcome screen, active round alert, past rounds
 │   │   ├── SettingsView.jsx# Bag editor, user profile, password & email changes
-│   │   └── StartRound.jsx  # Course search and player count setup
+│   │   └── StartRound.jsx  # My Courses vs Discover, GPS nearby search & custom courses
 │   ├── App.css             # Supplementary styling
 │   ├── App.jsx             # Main router state, auth listener, global state
 │   ├── index.css           # Tailwind base directives
 │   └── main.jsx            # Application entry point
 ├── tailwind.config.js      # Tailwind CSS configuration
 ├── vite.config.js          # Vite config with PWA setup
-└── package.json            # Scripts and dependencies
+├── package.json            # Scripts and dependencies
 ```
 
 ---
