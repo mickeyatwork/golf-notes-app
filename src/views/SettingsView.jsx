@@ -1,7 +1,36 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
-import { MOCK_USERS_DB, INITIAL_BAG } from '../data/mockData';
+import { INITIAL_BAG } from '../data/mockData';
 import { Icons } from '../components/Icons';
+import {
+  searchCourses,
+  createCustomCourse,
+  fetchFromGolfCourseApi,
+  isGolfCourseApiConfigured,
+  getMaskedApiKey,
+  ensureValidUuid,
+} from '../services/courseService';
+
+export const CLUB_SECTIONS = [
+  { type: 'Driver', label: 'Drivers', },
+  { type: 'Iron', label: 'Irons', },
+  { type: 'Hybrid', label: 'Hybrids', },
+  { type: 'Wedge', label: 'Wedges', },
+  { type: 'Putter', label: 'Putter', },
+  { type: 'Wood', label: 'Woods', },
+  { type: 'Other', label: 'Other Clubs', },
+];
+
+export function detectClubType(name = '') {
+  const lower = name.toLowerCase();
+  if (lower.includes('putter')) return 'Putter';
+  if (lower.includes('driver')) return 'Driver';
+  if (lower.includes('wood') || lower.includes('fairway') || lower.match(/\b\d+w\b/)) return 'Wood';
+  if (lower.includes('hybrid') || lower.includes('rescue') || lower.match(/\b\d+h\b/)) return 'Hybrid';
+  if (lower.includes('wedge') || lower.includes('°') || lower.match(/\b(pw|gw|sw|lw|aw)\b/)) return 'Wedge';
+  if (lower.includes('iron') || lower.match(/\b\d+i\b/)) return 'Iron';
+  return 'Other';
+}
 
 export default function SettingsView({
   navigate,
@@ -53,7 +82,24 @@ export default function SettingsView({
   // --- Admin State ---
   const [syncState, setSyncState] = useState('idle');
   const [progress, setProgress] = useState(0);
-  const [userList, setUserList] = useState(MOCK_USERS_DB);
+  const [userList, setUserList] = useState([]);
+  const [usersLoading, setUsersLoading] = useState(false);
+  const [userToDelete, setUserToDelete] = useState(null);
+  const [isDeletingUser, setIsDeletingUser] = useState(false);
+  const [userActionMessage, setUserActionMessage] = useState('');
+  const [userActionLoadingId, setUserActionLoadingId] = useState(null);
+  const [userSearchTerm, setUserSearchTerm] = useState('');
+  const [userStatusFilter, setUserStatusFilter] = useState('all'); // 'all' | 'active' | 'disabled'
+
+  // --- Admin Course Management State ---
+  const [adminCourses, setAdminCourses] = useState([]);
+  const [coursesLoading, setCoursesLoading] = useState(false);
+  const [courseSearchQuery, setCourseSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearchingCourse, setIsSearchingCourse] = useState(false);
+  const [showAddCourseModal, setShowAddCourseModal] = useState(false);
+  const [newCourseForm, setNewCourseForm] = useState({ name: '', location: '', par: 72 });
+  const [courseActionMessage, setCourseActionMessage] = useState('');
 
   // --- My Bag State ---
   const [editingClub, setEditingClub] = useState(null);
@@ -293,9 +339,297 @@ export default function SettingsView({
     }
   };
 
-  // Admin Actions
-  const toggleUserStatus = (userId) => {
-    setUserList(userList.map(u => u.id === userId ? { ...u, status: u.status === 'active' ? 'disabled' : 'active' } : u));
+  // Admin Actions: Fetch Real Users (No dummy data)
+  useEffect(() => {
+    if (tab === 'admin') {
+      loadRealUsers();
+      loadAdminCourses();
+    }
+  }, [tab]);
+
+  const loadRealUsers = async () => {
+    setUsersLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (!error && data && data.length > 0) {
+        setUserList(data.map(u => ({ ...u, status: u.status || 'active' })));
+      } else if (currentUser) {
+        // Fallback strictly to authentic current user profile, NEVER mock data
+        setUserList([{
+          id: currentUser.id,
+          username: currentUser.username,
+          first_name: currentUser.first_name,
+          last_name: currentUser.last_name,
+          handicap: currentUser.handicap,
+          role: currentUser.role,
+          status: currentUser.status || 'active',
+        }]);
+      } else {
+        setUserList([]);
+      }
+    } catch (e) {
+      if (currentUser) {
+        setUserList([{
+          id: currentUser.id,
+          username: currentUser.username,
+          first_name: currentUser.first_name,
+          last_name: currentUser.last_name,
+          handicap: currentUser.handicap,
+          role: currentUser.role,
+          status: currentUser.status || 'active',
+        }]);
+      } else {
+        setUserList([]);
+      }
+    } finally {
+      setUsersLoading(false);
+    }
+  };
+
+  const loadAdminCourses = async () => {
+    setCoursesLoading(true);
+    try {
+      const { data, error } = await supabase
+        .from('courses')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (!error && data) {
+        setAdminCourses(data);
+      }
+    } catch (e) {
+      console.warn('Could not load admin courses:', e);
+    } finally {
+      setCoursesLoading(false);
+    }
+  };
+
+  const handleAdminCourseSearch = async (e) => {
+    e.preventDefault();
+    if (!courseSearchQuery.trim()) return;
+    setIsSearchingCourse(true);
+    setCourseActionMessage('Searching courses...');
+    try {
+      const results = await searchCourses(courseSearchQuery.trim());
+      setSearchResults(results);
+      if (results.length === 0) {
+        setCourseActionMessage('No courses found matching that query.');
+      }
+    } catch (err) {
+      setCourseActionMessage(`⚠️ Search failed: ${err.message}`);
+    } finally {
+      setIsSearchingCourse(false);
+    }
+  };
+
+  const handleDirectApiSearch = async () => {
+    if (!courseSearchQuery.trim()) {
+      setCourseActionMessage('Please enter a course name or city (e.g. Pebble, St Andrews).');
+      return;
+    }
+    setIsSearchingCourse(true);
+    setCourseActionMessage('Searching Golf Course API...');
+    try {
+      const apiResults = await fetchFromGolfCourseApi(courseSearchQuery.trim());
+      setSearchResults(apiResults);
+      if (apiResults.length === 0) {
+        setCourseActionMessage('Golf Course API returned 0 courses for that query.');
+      } else {
+        setCourseActionMessage(`Found ${apiResults.length} courses from Golf Course API! Click "+ Save to DB" to import.`);
+      }
+    } catch (err) {
+      setCourseActionMessage(`⚠️ API Error: ${err.message}`);
+    } finally {
+      setIsSearchingCourse(false);
+    }
+  };
+
+  const handleSaveCourseGlobally = async (course) => {
+    setCourseActionMessage('Saving course to global catalog...');
+    try {
+      const payload = {
+        id: ensureValidUuid(course.id),
+        name: course.name,
+        location: course.location || 'Verified Course',
+        latitude: course.latitude || null,
+        longitude: course.longitude || null,
+        par: Number(course.par) || 72,
+        facilities: course.facilities || [],
+        is_custom: false, // Global course
+        api_provider: course.api_provider || 'admin_import',
+      };
+
+      let { error } = await supabase.from('courses').upsert(payload);
+
+      // Graceful fallback if schema cache lacks optional columns
+      if (error && (error.message?.includes('schema cache') || error.message?.includes('column'))) {
+        const basic = {
+          id: payload.id,
+          name: payload.name,
+          location: payload.location,
+          facilities: payload.facilities,
+        };
+        const retry = await supabase.from('courses').upsert(basic);
+        if (!retry.error) error = null;
+      }
+
+      if (error) throw error;
+      setCourseActionMessage(`✅ "${course.name}" saved to global courses!`);
+      loadAdminCourses();
+    } catch (err) {
+      setCourseActionMessage(`⚠️ Failed to save: ${err.message}`);
+    }
+  };
+
+  const handleCreateAdminCourseSubmit = async (e) => {
+    e.preventDefault();
+    if (!newCourseForm.name.trim()) return;
+    setCourseActionMessage('Adding new course...');
+    try {
+      const coursePayload = {
+        id: ensureValidUuid(),
+        name: newCourseForm.name.trim(),
+        location: newCourseForm.location.trim() || 'General',
+        par: Number(newCourseForm.par) || 72,
+        facilities: ['verified'],
+        is_custom: false, // Global course added by admin
+        created_by: currentUser?.id || null,
+      };
+
+      let { data, error } = await supabase.from('courses').insert(coursePayload).select().maybeSingle();
+
+      // If created_by or is_custom column is missing in Supabase schema cache, retry without optional columns
+      if (error && (error.message?.includes('created_by') || error.message?.includes('schema cache'))) {
+        const basicPayload = {
+          id: coursePayload.id,
+          name: coursePayload.name,
+          location: coursePayload.location,
+          facilities: coursePayload.facilities,
+        };
+        const retry = await supabase.from('courses').insert(basicPayload).select().maybeSingle();
+        if (!retry.error) {
+          error = null;
+          data = retry.data || basicPayload;
+        }
+      }
+
+      if (error) throw error;
+      setCourseActionMessage(`✅ Added "${newCourseForm.name}" to courses!`);
+      setShowAddCourseModal(false);
+      setNewCourseForm({ name: '', location: '', par: 72 });
+      loadAdminCourses();
+    } catch (err) {
+      setCourseActionMessage(`⚠️ Could not add course: ${err.message}`);
+    }
+  };
+
+  const handleDeleteAdminCourse = async (courseId, courseName) => {
+    if (!confirm(`Are you sure you want to delete "${courseName}" from the database?`)) return;
+    try {
+      const { error } = await supabase.from('courses').delete().eq('id', courseId);
+      if (!error) {
+        setAdminCourses(prev => prev.filter(c => c.id !== courseId));
+        setCourseActionMessage(`🗑️ Deleted "${courseName}"`);
+      }
+    } catch (err) {
+      setCourseActionMessage(`⚠️ Delete failed: ${err.message}`);
+    }
+  };
+
+  // Admin Action: Deactivate / Reactivate User
+  const handleToggleUserStatus = async (user) => {
+    if (user.id === currentUser?.id) {
+      setUserActionMessage('⚠️ You cannot deactivate your own admin account.');
+      setTimeout(() => setUserActionMessage(''), 4500);
+      return;
+    }
+
+    const nextStatus = user.status === 'disabled' ? 'active' : 'disabled';
+    setUserActionLoadingId(user.id);
+    setUserActionMessage('');
+
+    try {
+      // 1. Optimistic local update
+      setUserList(prev => prev.map(u => u.id === user.id ? { ...u, status: nextStatus } : u));
+
+      // 2. Persist to Supabase profiles
+      const { error } = await supabase
+        .from('profiles')
+        .update({ status: nextStatus, updated_at: new Date().toISOString() })
+        .eq('id', user.id);
+
+      if (error) {
+        console.warn('Could not update status in Supabase:', error.message);
+        setUserActionMessage(`⚠️ Status updated locally. Cloud returned: ${error.message}`);
+      } else {
+        setUserActionMessage(
+          nextStatus === 'disabled'
+            ? `✓ User @${user.username || 'user'} has been deactivated.`
+            : `✓ User @${user.username || 'user'} has been reactivated.`
+        );
+      }
+    } catch (err) {
+      setUserActionMessage(`⚠️ Error updating user: ${err.message}`);
+    } finally {
+      setUserActionLoadingId(null);
+      setTimeout(() => setUserActionMessage(''), 4500);
+    }
+  };
+
+  // Admin Action: Permanently Delete User Profile & Data
+  const handleConfirmDeleteUser = async () => {
+    if (!userToDelete) return;
+    if (userToDelete.id === currentUser?.id) {
+      setUserActionMessage('⚠️ You cannot delete your own admin account.');
+      setUserToDelete(null);
+      setTimeout(() => setUserActionMessage(''), 4500);
+      return;
+    }
+
+    setIsDeletingUser(true);
+    setUserActionMessage('');
+
+    try {
+      // 1. Delete associated data first
+      try {
+        await supabase.from('shots').delete().match({ user_id: userToDelete.id });
+      } catch (e) { }
+      try {
+        await supabase.from('round_holes').delete().match({ user_id: userToDelete.id });
+      } catch (e) { }
+      try {
+        await supabase.from('rounds').delete().eq('user_id', userToDelete.id);
+      } catch (e) { }
+      try {
+        await supabase.from('green_pins').delete().eq('user_id', userToDelete.id);
+      } catch (e) { }
+
+      // 2. Delete from profiles
+      const { error: profileErr } = await supabase
+        .from('profiles')
+        .delete()
+        .eq('id', userToDelete.id);
+
+      // 3. Update local user list
+      setUserList(prev => prev.filter(u => u.id !== userToDelete.id));
+
+      if (profileErr) {
+        console.warn('Supabase delete profile warning:', profileErr.message);
+        setUserActionMessage(`⚠️ User removed locally. Cloud returned: ${profileErr.message}`);
+      } else {
+        setUserActionMessage(`✓ User @${userToDelete.username || 'user'} and all related data have been deleted.`);
+      }
+      setUserToDelete(null);
+    } catch (err) {
+      setUserActionMessage(`⚠️ Delete failed: ${err.message}`);
+    } finally {
+      setIsDeletingUser(false);
+      setTimeout(() => setUserActionMessage(''), 4500);
+    }
   };
 
   const runSimulatedSync = () => {
@@ -316,10 +650,25 @@ export default function SettingsView({
   // My Bag Handlers
   const saveClub = (e) => {
     e.preventDefault();
+    const clubType = editingClub.type || detectClubType(editingClub.name);
+    const isPutter = clubType === 'Putter' || editingClub.name.toLowerCase().includes('putter');
+    const carryValue = isPutter
+      ? 0
+      : (editingClub.carry !== '' && editingClub.carry !== null && !isNaN(Number(editingClub.carry)))
+        ? Number(editingClub.carry)
+        : null;
+
+    const clubToSave = {
+      ...editingClub,
+      name: editingClub.name.trim(),
+      type: clubType,
+      carry: carryValue,
+    };
+
     if (editingClub.id) {
-      setBag(bag.map(c => c.id === editingClub.id ? editingClub : c));
+      setBag(bag.map(c => c.id === editingClub.id ? clubToSave : c));
     } else {
-      setBag([...bag, { ...editingClub, id: Date.now() }]);
+      setBag([...bag, { ...clubToSave, id: Date.now() }]);
     }
     setEditingClub(null);
   };
@@ -337,6 +686,22 @@ export default function SettingsView({
 
   const initials = `${firstName?.[0] || ''}${lastName?.[0] || ''}`.toUpperCase() || (currentUser?.username?.[0] || 'G').toUpperCase();
   const isAdmin = currentUser?.role?.toLowerCase() === 'admin';
+
+  const filteredUserList = userList.filter(u => {
+    const term = userSearchTerm.trim().toLowerCase();
+    const matchesSearch = !term ||
+      (u.username && u.username.toLowerCase().includes(term)) ||
+      (u.first_name && u.first_name.toLowerCase().includes(term)) ||
+      (u.last_name && u.last_name.toLowerCase().includes(term));
+
+    const matchesStatus = userStatusFilter === 'all'
+      ? true
+      : userStatusFilter === 'active'
+        ? u.status !== 'disabled'
+        : u.status === 'disabled';
+
+    return matchesSearch && matchesStatus;
+  });
 
   return (
     <div className="p-6 bg-gray-50 min-h-screen pb-28">
@@ -750,7 +1115,7 @@ export default function SettingsView({
                       Load Standard Starter Bag
                     </button>
                     <button
-                      onClick={() => setEditingClub({ name: '', carry: '', stance: '', swing: '' })}
+                      onClick={() => setEditingClub({ name: '', type: 'Iron', carry: '', stance: '', swing: '' })}
                       className="w-full bg-gray-100 hover:bg-gray-200 text-gray-800 font-bold py-3 rounded-xl text-sm transition"
                     >
                       + Add Single Club
@@ -758,29 +1123,65 @@ export default function SettingsView({
                   </div>
                 </div>
               ) : (
-                <div className="space-y-3">
-                  {bag.map(club => (
-                    <div
-                      key={club.id}
-                      className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm flex justify-between items-center group cursor-pointer hover:border-green-300 transition"
-                      onClick={() => setEditingClub(club)}
-                    >
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <h4 className="font-bold text-gray-900 text-lg">{club.name}</h4>
-                          <span className="bg-gray-100 text-gray-600 text-[10px] font-black px-2 py-0.5 rounded-full">{club.carry}y</span>
+                <div className="space-y-5">
+                  {CLUB_SECTIONS.map(sec => {
+                    const secClubs = bag.filter(c => (c.type || detectClubType(c.name)) === sec.type);
+                    if (secClubs.length === 0) return null;
+                    return (
+                      <div key={sec.type} className="space-y-2">
+                        <div className="flex items-center gap-1.5 px-1 pt-1">
+                          <span className="text-sm">{sec.icon}</span>
+                          <h4 className="text-xs font-black text-gray-500 uppercase tracking-wider">{sec.label}</h4>
+                          <span className="text-[10px] font-bold text-gray-400 bg-gray-100 px-1.5 py-0.2 rounded-full">
+                            {secClubs.length}
+                          </span>
                         </div>
-                        <p className="text-xs text-gray-500 truncate max-w-[200px]">{club.swing || 'No swing thoughts added.'}</p>
+                        <div className="space-y-2">
+                          {secClubs.map(club => {
+                            const hasYardage = club.carry && Number(club.carry) > 0;
+                            const isPutter = (club.type || detectClubType(club.name)) === 'Putter';
+
+                            return (
+                              <div
+                                key={club.id}
+                                className="bg-white p-3.5 rounded-2xl border border-gray-100 shadow-sm flex justify-between items-center group cursor-pointer hover:border-green-300 transition"
+                                onClick={() => setEditingClub({
+                                  ...club,
+                                  type: club.type || detectClubType(club.name),
+                                  carry: club.carry !== null && club.carry !== undefined && club.carry !== 0 ? club.carry : '',
+                                })}
+                              >
+                                <div>
+                                  <div className="flex items-center gap-2 mb-0.5">
+                                    <h4 className="font-bold text-gray-900 text-base">{club.name}</h4>
+                                    {hasYardage && !isPutter ? (
+                                      <span className="bg-gray-100 text-gray-700 text-[10px] font-black px-2 py-0.5 rounded-full">
+                                        {club.carry}y
+                                      </span>
+                                    ) : isPutter ? (
+                                      <span className="bg-emerald-50 text-emerald-700 text-[10px] font-black px-2 py-0.5 rounded-full">
+                                        Putter
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <p className="text-xs text-gray-500 truncate max-w-[220px]">
+                                    {club.swing || club.stance || 'No swing thoughts added.'}
+                                  </p>
+                                </div>
+                                <div className="text-gray-400 group-hover:text-green-600 p-1">
+                                  <Icons.Pencil />
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
                       </div>
-                      <div className="text-gray-400 group-hover:text-green-600">
-                        <Icons.Pencil />
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
 
                   <button
-                    onClick={() => setEditingClub({ name: '', carry: '', stance: '', swing: '' })}
-                    className="w-full mt-4 bg-green-50 text-green-700 border-2 border-dashed border-green-200 font-bold py-4 rounded-xl hover:bg-green-100 hover:border-green-400 transition flex justify-center items-center gap-2"
+                    onClick={() => setEditingClub({ name: '', type: 'Iron', carry: '', stance: '', swing: '' })}
+                    className="w-full mt-2 bg-green-50 text-green-700 border-2 border-dashed border-green-200 font-bold py-3.5 rounded-xl hover:bg-green-100 hover:border-green-400 transition flex justify-center items-center gap-2 text-sm shadow-xs"
                   >
                     <Icons.Plus /> Add New Club
                   </button>
@@ -790,45 +1191,108 @@ export default function SettingsView({
           ) : (
             <form onSubmit={saveClub} className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm space-y-4">
               <div className="flex justify-between items-center border-b border-gray-100 pb-3 mb-2">
-                <h3 className="font-bold text-gray-900 text-lg">{editingClub.id ? 'Edit Club' : 'Add New Club'}</h3>
+                <div>
+                  <h3 className="font-bold text-gray-900 text-lg">{editingClub.id ? 'Edit Club' : 'Add New Club'}</h3>
+                  <p className="text-xs text-gray-400">Configure club category, yardage, and swing cues</p>
+                </div>
                 {editingClub.id && (
-                  <button type="button" onClick={() => deleteClub(editingClub.id)} className="text-red-500 p-2 hover:bg-red-50 rounded-full">
+                  <button type="button" onClick={() => deleteClub(editingClub.id)} className="text-red-500 p-2 hover:bg-red-50 rounded-full" title="Remove club">
                     <Icons.Trash />
                   </button>
                 )}
               </div>
 
-              <div className="grid grid-cols-3 gap-3">
-                <div className="col-span-2">
-                  <label className="block text-[10px] font-black text-gray-400 mb-1 uppercase tracking-wider">Club Name</label>
-                  <input
-                    required
-                    type="text"
-                    placeholder="e.g. 5-Wood"
-                    value={editingClub.name}
-                    onChange={e => setEditingClub({ ...editingClub, name: e.target.value })}
-                    className="w-full p-3 border border-gray-200 rounded-xl bg-gray-50 focus:outline-none focus:border-green-500 font-medium"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[10px] font-black text-gray-400 mb-1 uppercase tracking-wider">Carry (y)</label>
-                  <input
-                    required
-                    type="number"
-                    placeholder="200"
-                    value={editingClub.carry}
-                    onChange={e => setEditingClub({ ...editingClub, carry: e.target.value })}
-                    className="w-full p-3 border border-gray-200 rounded-xl bg-gray-50 focus:outline-none focus:border-green-500 font-medium"
-                  />
+              {/* Club Category Selection */}
+              <div>
+                <label className="block text-[10px] font-black text-gray-400 mb-1.5 uppercase tracking-wider">Club Category / Type</label>
+                <div className="flex gap-1.5 overflow-x-auto pb-1">
+                  {CLUB_SECTIONS.map(s => {
+                    const currentType = editingClub.type || detectClubType(editingClub.name);
+                    const isSelected = currentType === s.type;
+                    return (
+                      <button
+                        key={s.type}
+                        type="button"
+                        onClick={() => {
+                          const updated = { ...editingClub, type: s.type };
+                          if (s.type === 'Putter') updated.carry = '';
+                          setEditingClub(updated);
+                        }}
+                        className={`px-3 py-1.5 rounded-xl text-xs font-bold shrink-0 transition flex items-center gap-1 ${isSelected
+                          ? 'bg-green-600 text-white shadow-xs'
+                          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                          }`}
+                      >
+                        <span>{s.icon}</span>
+                        <span>{s.type}</span>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
+
+              {/* Club Name & Yardage (Hidden if Putter) */}
+              {(() => {
+                const currentType = editingClub.type || detectClubType(editingClub.name);
+                const isPutter = currentType === 'Putter';
+
+                if (isPutter) {
+                  return (
+                    <div>
+                      <label className="block text-[10px] font-black text-gray-400 mb-1 uppercase tracking-wider">Club Name</label>
+                      <input
+                        required
+                        type="text"
+                        placeholder="e.g. Blade Putter"
+                        value={editingClub.name}
+                        onChange={e => setEditingClub({ ...editingClub, name: e.target.value, carry: '' })}
+                        className="w-full p-3 border border-gray-200 rounded-xl bg-gray-50 focus:outline-none focus:border-green-500 font-medium text-sm"
+                      />
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="grid grid-cols-3 gap-3">
+                    <div className="col-span-2">
+                      <label className="block text-[10px] font-black text-gray-400 mb-1 uppercase tracking-wider">Club Name</label>
+                      <input
+                        required
+                        type="text"
+                        placeholder="e.g. 5 Wood, 7 Iron, 52° Wedge..."
+                        value={editingClub.name}
+                        onChange={e => {
+                          const val = e.target.value;
+                          const autoType = detectClubType(val);
+                          setEditingClub({
+                            ...editingClub,
+                            name: val,
+                            type: editingClub.type && editingClub.type !== 'Other' ? editingClub.type : autoType,
+                          });
+                        }}
+                        className="w-full p-3 border border-gray-200 rounded-xl bg-gray-50 focus:outline-none focus:border-green-500 font-medium text-sm"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[10px] font-black text-gray-400 mb-1 uppercase tracking-wider">Carry (Y)</label>
+                      <input
+                        type="number"
+                        placeholder="e.g. 165"
+                        value={editingClub.carry || ''}
+                        onChange={e => setEditingClub({ ...editingClub, carry: e.target.value })}
+                        className="w-full p-3 border border-gray-200 rounded-xl bg-gray-50 focus:outline-none focus:border-green-500 font-medium text-sm text-center"
+                      />
+                    </div>
+                  </div>
+                );
+              })()}
 
               <div>
                 <label className="block text-[10px] font-black text-gray-400 mb-1 uppercase tracking-wider">Stance & Setup Notes</label>
                 <textarea
                   rows="2"
                   placeholder="Where does the ball go in your stance?"
-                  value={editingClub.stance}
+                  value={editingClub.stance || ''}
                   onChange={e => setEditingClub({ ...editingClub, stance: e.target.value })}
                   className="w-full p-3 border border-gray-200 rounded-xl bg-gray-50 focus:outline-none focus:border-green-500 text-sm font-medium resize-none"
                 ></textarea>
@@ -839,7 +1303,7 @@ export default function SettingsView({
                 <textarea
                   rows="3"
                   placeholder="What are you focusing on when swinging this club?"
-                  value={editingClub.swing}
+                  value={editingClub.swing || ''}
                   onChange={e => setEditingClub({ ...editingClub, swing: e.target.value })}
                   className="w-full p-3 border border-gray-200 rounded-xl bg-gray-50 focus:outline-none focus:border-green-500 text-sm font-medium resize-none"
                 ></textarea>
@@ -849,13 +1313,13 @@ export default function SettingsView({
                 <button
                   type="button"
                   onClick={() => setEditingClub(null)}
-                  className="flex-1 bg-gray-100 text-gray-600 font-bold py-3 rounded-xl hover:bg-gray-200 transition"
+                  className="flex-1 bg-gray-100 text-gray-600 font-bold py-3 rounded-xl hover:bg-gray-200 transition text-sm"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 bg-green-600 text-white font-bold py-3 rounded-xl hover:bg-green-700 transition active:scale-95"
+                  className="flex-1 bg-green-600 text-white font-bold py-3 rounded-xl hover:bg-green-700 transition active:scale-95 text-sm shadow-md"
                 >
                   Save Club
                 </button>
@@ -870,10 +1334,307 @@ export default function SettingsView({
       ========================================================================= */}
       {tab === 'admin' && isAdmin && (
         <div className="space-y-6 animate-in fade-in">
-          {/* Simulated Cloud Sync Panel */}
+          {/* Action Message Feedback */}
+          {courseActionMessage && (
+            <div className="p-3 bg-blue-50 border border-blue-200 text-blue-900 rounded-xl text-xs font-semibold animate-in fade-in flex justify-between items-center">
+              <span>{courseActionMessage}</span>
+              <button onClick={() => setCourseActionMessage('')} className="font-bold text-gray-400 hover:text-gray-700 ml-2">✕</button>
+            </div>
+          )}
+
+          {/* 1. Golf Course Directory Management */}
+          <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm space-y-4">
+            <div className="flex justify-between items-center">
+              <div>
+                <h4 className="font-bold text-gray-900 text-base">Course Directory</h4>
+                <p className="text-xs text-gray-400">Search and manage courses available to all golfers</p>
+              </div>
+              <button
+                onClick={() => setShowAddCourseModal(true)}
+                className="bg-green-600 hover:bg-green-700 text-white font-black text-xs px-3.5 py-2 rounded-xl transition flex items-center gap-1 active:scale-95 shadow-sm"
+              >
+                <Icons.Plus /> Add Course
+              </button>
+            </div>
+
+            {/* API Connection Status Badge */}
+            <div className="flex justify-between items-center bg-gray-50 p-2.5 px-3 rounded-xl border border-gray-200 text-xs">
+              <div className="flex items-center gap-1.5 font-bold">
+                <span className={`w-2 h-2 rounded-full ${isGolfCourseApiConfigured() ? 'bg-green-500' : 'bg-amber-500'}`}></span>
+                <span className="text-gray-700">Golf Course API:</span>
+                <span className={isGolfCourseApiConfigured() ? 'text-green-700' : 'text-amber-700'}>
+                  {isGolfCourseApiConfigured() ? `Connected (${getMaskedApiKey()})` : 'Missing Key in .env'}
+                </span>
+              </div>
+              <span className="text-[10px] text-gray-400 font-bold uppercase">35 free req/mo</span>
+            </div>
+
+            {/* Course Search / Import Tool */}
+            <form onSubmit={handleAdminCourseSearch} className="flex gap-2 flex-wrap sm:flex-nowrap">
+              <input
+                type="text"
+                placeholder="Search course name or city (e.g. Pebble, St Andrews)..."
+                value={courseSearchQuery}
+                onChange={(e) => setCourseSearchQuery(e.target.value)}
+                className="w-full sm:flex-1 p-3 border border-gray-200 rounded-xl text-xs font-semibold bg-gray-50 focus:outline-none focus:ring-2 focus:ring-green-600"
+              />
+              <div className="flex gap-1.5 w-full sm:w-auto">
+                <button
+                  type="submit"
+                  disabled={isSearchingCourse}
+                  className="flex-1 sm:flex-none bg-gray-900 hover:bg-black text-white font-bold text-xs px-4 py-3 rounded-xl transition disabled:opacity-50"
+                >
+                  {isSearchingCourse ? 'Searching...' : 'Search'}
+                </button>
+                {isGolfCourseApiConfigured() && (
+                  <button
+                    type="button"
+                    onClick={handleDirectApiSearch}
+                    disabled={isSearchingCourse || !courseSearchQuery.trim()}
+                    className="flex-1 sm:flex-none bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs px-3 py-3 rounded-xl transition disabled:opacity-50 whitespace-nowrap flex items-center justify-center gap-1"
+                    title="Search external Golf Course API directory directly"
+                  >
+                    <span>🌐</span> API Search
+                  </button>
+                )}
+              </div>
+            </form>
+
+            {/* Search Results */}
+            {searchResults.length > 0 && (
+              <div className="border border-green-200 bg-green-50/50 rounded-xl p-3 space-y-2">
+                <span className="text-[10px] uppercase font-black text-green-800 tracking-wider block">
+                  Search Results ({searchResults.length}):
+                </span>
+                <div className="space-y-2 max-h-56 overflow-y-auto">
+                  {searchResults.map(c => {
+                    const isAlreadySaved = adminCourses.some(ac => ac.name.toLowerCase() === c.name.toLowerCase());
+                    return (
+                      <div key={c.id} className="bg-white p-3 rounded-lg border border-gray-200 flex justify-between items-center text-xs">
+                        <div>
+                          <p className="font-bold text-gray-900">{c.name}</p>
+                          <p className="text-[10px] text-gray-500">{c.location || 'Unknown Location'} • Par {c.par || 72}</p>
+                        </div>
+                        {isAlreadySaved ? (
+                          <span className="text-[10px] font-bold text-gray-400 bg-gray-100 px-2 py-1 rounded">
+                            In Database
+                          </span>
+                        ) : (
+                          <button
+                            onClick={() => handleSaveCourseGlobally(c)}
+                            className="bg-green-600 hover:bg-green-700 text-white font-bold text-[10px] px-3 py-1.5 rounded-lg transition"
+                          >
+                            + Save to DB
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Database Courses List */}
+            <div className="pt-2">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-xs font-black uppercase tracking-wider text-gray-400">
+                  Managed Courses ({adminCourses.length})
+                </span>
+                <button
+                  onClick={loadAdminCourses}
+                  className="text-[10px] text-blue-600 font-bold hover:underline"
+                >
+                  Refresh
+                </button>
+              </div>
+
+              {coursesLoading ? (
+                <div className="p-4 text-center text-xs text-gray-400">Loading courses...</div>
+              ) : adminCourses.length === 0 ? (
+                <div className="p-4 bg-gray-50 rounded-xl text-center text-xs text-gray-400">
+                  No courses in database yet. Use search or "+ Add Course" to add one!
+                </div>
+              ) : (
+                <div className="space-y-2 max-h-60 overflow-y-auto">
+                  {adminCourses.map(c => (
+                    <div key={c.id} className="flex justify-between items-center bg-gray-50 p-3 rounded-xl border border-gray-100 text-xs">
+                      <div>
+                        <span className="font-bold text-gray-800 block">{c.name}</span>
+                        <span className="text-[10px] text-gray-400">{c.location || 'Local'} • Par {c.par || 72}</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {c.is_custom && (
+                          <span className="text-[9px] font-black uppercase text-purple-700 bg-purple-50 px-1.5 py-0.5 rounded border border-purple-200">
+                            Custom
+                          </span>
+                        )}
+                        <button
+                          onClick={() => handleDeleteAdminCourse(c.id, c.name)}
+                          className="text-red-400 hover:text-red-600 p-1"
+                          title="Delete Course"
+                        >
+                          <Icons.Trash />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 2. Registered Users (Authentic data only, full Admin controls) */}
+          <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm space-y-4">
+            <div className="flex justify-between items-center">
+              <div>
+                <h4 className="font-bold text-gray-900 text-base">Registered Users</h4>
+                <p className="text-xs text-gray-400">Manage user accounts, deactivation, and deletion</p>
+              </div>
+              <span className="text-xs font-bold text-gray-400">{userList.length} Total</span>
+            </div>
+
+            {userActionMessage && (
+              <div className="p-3 bg-blue-50 border border-blue-200 text-blue-900 rounded-xl text-xs font-semibold animate-in fade-in flex justify-between items-center">
+                <span>{userActionMessage}</span>
+                <button
+                  type="button"
+                  onClick={() => setUserActionMessage('')}
+                  className="text-blue-500 hover:text-blue-700 font-bold ml-2 text-sm"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            {/* Filter & Search Bar */}
+            <div className="space-y-2">
+              <input
+                type="text"
+                placeholder="Search users by name or username..."
+                value={userSearchTerm}
+                onChange={(e) => setUserSearchTerm(e.target.value)}
+                className="w-full p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs font-medium focus:outline-none focus:ring-2 focus:ring-blue-600"
+              />
+              <div className="flex gap-1.5 flex-wrap">
+                {[
+                  { key: 'all', label: `All (${userList.length})` },
+                  { key: 'active', label: `Active (${userList.filter(u => u.status !== 'disabled').length})` },
+                  { key: 'disabled', label: `Deactivated (${userList.filter(u => u.status === 'disabled').length})` },
+                ].map(f => (
+                  <button
+                    key={f.key}
+                    type="button"
+                    onClick={() => setUserStatusFilter(f.key)}
+                    className={`px-3 py-1 text-xs font-bold rounded-lg transition ${userStatusFilter === f.key
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                      }`}
+                  >
+                    {f.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {usersLoading ? (
+              <div className="p-4 text-center text-xs text-gray-400">Loading users...</div>
+            ) : filteredUserList.length === 0 ? (
+              <div className="p-4 bg-gray-50 rounded-xl text-center text-xs text-gray-400">
+                {userSearchTerm || userStatusFilter !== 'all' ? 'No users matching filter.' : 'No users found in database.'}
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                {filteredUserList.map(u => {
+                  const isSelf = u.id === currentUser?.id;
+                  const isUserLoading = userActionLoadingId === u.id;
+                  const isDeactivated = u.status === 'disabled';
+
+                  return (
+                    <div
+                      key={u.id}
+                      className={`flex justify-between items-center p-3 rounded-xl border text-sm transition ${isDeactivated
+                        ? 'bg-red-50/40 border-red-100 opacity-90'
+                        : 'bg-gray-50 border-gray-100'
+                        }`}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className={`w-9 h-9 rounded-xl font-black text-xs flex items-center justify-center shrink-0 ${u.role === 'admin' ? 'bg-blue-700 text-white' : 'bg-gray-200 text-gray-700'
+                          }`}>
+                          {(u.first_name?.[0] || u.username?.[0] || 'U').toUpperCase()}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-bold text-gray-800 truncate">@{u.username || 'user'}</span>
+                            {isSelf && (
+                              <span className="bg-gray-200 text-gray-700 text-[9px] font-black px-1.5 py-0.5 rounded uppercase">
+                                You
+                              </span>
+                            )}
+                            {u.role === 'admin' && (
+                              <span className="bg-blue-100 text-blue-700 text-[9px] font-black px-1.5 py-0.5 rounded uppercase">
+                                Admin
+                              </span>
+                            )}
+                            <span className={`text-[9px] font-black px-1.5 py-0.5 rounded uppercase ${isDeactivated ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
+                              }`}>
+                              {isDeactivated ? 'Deactivated' : 'Active'}
+                            </span>
+                          </div>
+                          <span className="text-xs text-gray-400 block mt-0.5 truncate">
+                            {u.first_name || u.last_name ? `${u.first_name || ''} ${u.last_name || ''}`.trim() : 'No name set'}
+                            {u.handicap !== null && u.handicap !== undefined ? ` • HCP ${u.handicap}` : ' • No HCP'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0 ml-2">
+                        {/* Deactivate / Reactivate button */}
+                        {isSelf ? (
+                          <span className="text-[10px] font-bold text-gray-400 bg-gray-100 px-2.5 py-1 rounded-full">
+                            Protected
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => handleToggleUserStatus(u)}
+                            disabled={isUserLoading}
+                            className={`text-xs font-bold px-3 py-1.5 rounded-full transition shadow-xs active:scale-95 ${isDeactivated
+                              ? 'bg-green-600 hover:bg-green-700 text-white'
+                              : 'bg-amber-100 hover:bg-amber-200 text-amber-800 border border-amber-200'
+                              }`}
+                            title={isDeactivated ? 'Reactivate User' : 'Deactivate User'}
+                          >
+                            {isUserLoading
+                              ? 'Saving...'
+                              : isDeactivated
+                                ? 'Reactivate'
+                                : 'Deactivate'}
+                          </button>
+                        )}
+
+                        {/* Delete User Button */}
+                        {!isSelf && (
+                          <button
+                            type="button"
+                            onClick={() => setUserToDelete(u)}
+                            className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition"
+                            title="Permanently Delete User"
+                          >
+                            <Icons.Trash />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* 3. Database Synchronization Panel */}
           <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm space-y-4">
             <h4 className="font-bold text-gray-900 text-base">Supabase Synchronization</h4>
-            <p className="text-xs text-gray-500">Run manual sync check to ensure all local rounds and clubs match Supabase tables.</p>
+            <p className="text-xs text-gray-500">Run sync check to verify connectivity to cloud database tables.</p>
 
             {syncState === 'syncing' && (
               <div className="space-y-2">
@@ -898,28 +1659,80 @@ export default function SettingsView({
               Run Database Sync Test
             </button>
           </div>
+        </div>
+      )}
 
-          {/* User List Management */}
-          <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm space-y-4">
-            <h4 className="font-bold text-gray-900 text-base">Registered Users</h4>
-            <div className="space-y-2.5">
-              {userList.map(u => (
-                <div key={u.id} className="flex justify-between items-center bg-gray-50 p-3 rounded-xl border border-gray-100 text-sm">
-                  <div>
-                    <span className="font-bold text-gray-800">{u.username}</span>
-                    <span className="text-xs text-gray-400 block">{u.firstName} {u.lastName} • HCP {u.handicap}</span>
-                  </div>
-                  <button
-                    onClick={() => toggleUserStatus(u.id)}
-                    className={`text-xs font-bold px-3 py-1.5 rounded-full transition ${u.status === 'active' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-600'
-                      }`}
-                  >
-                    {u.status === 'active' ? 'Active' : 'Disabled'}
-                  </button>
-                </div>
-              ))}
+      {/* Admin Add Course Modal */}
+      {showAddCourseModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in">
+          <form
+            onSubmit={handleCreateAdminCourseSubmit}
+            className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl space-y-4 animate-in zoom-in-95 duration-200"
+          >
+            <div className="flex justify-between items-center border-b border-gray-100 pb-2">
+              <div>
+                <h3 className="text-lg font-black text-gray-900">Add Course to Catalog</h3>
+                <p className="text-[10px] text-green-700 font-bold uppercase tracking-wider">
+                  Global Course (Visible to all users)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAddCourseModal(false)}
+                className="text-gray-400 hover:text-gray-600 font-bold text-lg"
+              >
+                ✕
+              </button>
             </div>
-          </div>
+
+            <div>
+              <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-1">
+                Course Name *
+              </label>
+              <input
+                required
+                type="text"
+                placeholder="e.g. Wentworth Golf Club"
+                value={newCourseForm.name}
+                onChange={e => setNewCourseForm({ ...newCourseForm, name: e.target.value })}
+                className="w-full p-3 rounded-xl border border-gray-300 font-semibold text-sm focus:outline-none focus:ring-2 focus:ring-green-600"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-1">
+                Location
+              </label>
+              <input
+                type="text"
+                placeholder="e.g. Surrey, England"
+                value={newCourseForm.location}
+                onChange={e => setNewCourseForm({ ...newCourseForm, location: e.target.value })}
+                className="w-full p-3 rounded-xl border border-gray-300 font-semibold text-sm focus:outline-none focus:ring-2 focus:ring-green-600"
+              />
+            </div>
+
+            <div>
+              <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-1">
+                Par
+              </label>
+              <input
+                type="number"
+                min="60"
+                max="80"
+                value={newCourseForm.par}
+                onChange={e => setNewCourseForm({ ...newCourseForm, par: e.target.value })}
+                className="w-full p-3 rounded-xl border border-gray-300 font-bold text-sm focus:outline-none focus:ring-2 focus:ring-green-600"
+              />
+            </div>
+
+            <button
+              type="submit"
+              className="w-full bg-green-600 text-white font-bold py-3.5 rounded-xl shadow-md hover:bg-green-700 transition active:scale-95"
+            >
+              Add to Global Directory
+            </button>
+          </form>
         </div>
       )}
 
@@ -948,6 +1761,47 @@ export default function SettingsView({
               <button
                 onClick={() => setShowSignOutConfirm(false)}
                 className="w-full text-gray-400 hover:text-gray-600 font-bold py-3 transition"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Delete User Confirmation Modal */}
+      {userToDelete && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50 animate-in fade-in">
+          <div className="bg-white rounded-3xl p-6 w-full max-w-sm shadow-2xl animate-in zoom-in-95 duration-200 space-y-4">
+            <div className="w-12 h-12 bg-red-100 text-red-600 rounded-2xl flex items-center justify-center text-2xl mx-auto shadow-xs">
+              ⚠️
+            </div>
+            <div className="text-center">
+              <h3 className="text-xl font-black text-gray-900 mb-1">Delete User Account?</h3>
+              <p className="text-xs text-gray-500 leading-relaxed">
+                Are you sure you want to permanently delete user <strong className="text-gray-900">@{userToDelete.username || 'user'}</strong>
+                {userToDelete.first_name ? ` (${userToDelete.first_name} ${userToDelete.last_name || ''})` : ''}?
+              </p>
+            </div>
+
+            <div className="bg-red-50 border border-red-100 p-3 rounded-xl text-[11px] text-red-800 font-medium leading-tight">
+              ⚠️ <strong>Warning:</strong> This will delete their profile, round histories, recorded shots, and cloud markers. This action cannot be undone.
+            </div>
+
+            <div className="flex flex-col gap-2 pt-2">
+              <button
+                type="button"
+                onClick={handleConfirmDeleteUser}
+                disabled={isDeletingUser}
+                className="w-full bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold py-3.5 rounded-xl transition shadow-md active:scale-95 text-sm"
+              >
+                {isDeletingUser ? 'Deleting User...' : 'Yes, Permanently Delete User'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setUserToDelete(null)}
+                disabled={isDeletingUser}
+                className="w-full text-gray-400 hover:text-gray-600 font-bold py-2.5 transition text-sm"
               >
                 Cancel
               </button>

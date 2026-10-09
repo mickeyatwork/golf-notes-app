@@ -72,35 +72,54 @@ export default function Dashboard({
         </div>
       )}
 
-      {/* Start Round CTA */}
-      <button
-        onClick={() => activeRound ? setShowPrompt(true) : navigate('start')}
-        className="w-full bg-green-600 text-white text-lg font-bold py-4 rounded-xl shadow-md mb-8 hover:bg-green-700 transition active:scale-95 flex items-center justify-center gap-2"
-      >
-        <span>+</span> Start New Round
-      </button>
-
-      {/* Recent Rounds Section */}
-      <div className="flex justify-between items-center mb-3">
-        <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider">Recent Rounds</h3>
-        {rounds.length > 0 && (
-          <span className="text-xs font-semibold text-gray-400">{rounds.length} Total</span>
-        )}
+      {/* Start Round & Analytics CTAs */}
+      <div className="flex gap-2 mb-8">
+        <button
+          onClick={() => activeRound ? setShowPrompt(true) : navigate('start')}
+          className="flex-1 bg-green-600 text-white text-base font-black py-4 rounded-xl shadow-md hover:bg-green-700 transition active:scale-95 flex items-center justify-center gap-2"
+        >
+          <span>+</span> Start New Round
+        </button>
+        <button
+          onClick={() => navigate('analytics')}
+          className="bg-white border border-gray-200 text-gray-800 font-bold px-4 py-4 rounded-xl shadow-sm hover:border-green-500 hover:text-green-700 transition active:scale-95 flex items-center justify-center gap-1.5"
+          title="View Analytics & Reports"
+        >
+          <Icons.BarChart />
+          <span className="text-xs uppercase tracking-wider font-black">Stats</span>
+        </button>
       </div>
 
-      {rounds.length === 0 ? (
-        <div className="bg-white p-8 rounded-2xl border-2 border-dashed border-gray-200 text-center">
-          <div className="w-12 h-12 bg-green-50 text-green-700 rounded-full flex items-center justify-center mx-auto text-xl mb-3">
-            ⛳
-          </div>
-          <h4 className="font-bold text-gray-800 text-base">No Rounds Recorded Yet</h4>
-          <p className="text-xs text-gray-500 mt-1 max-w-xs mx-auto leading-relaxed">
-            Your recorded scorecards and hole-by-hole shot stats will appear here. Hit "+ Start New Round" to play your first round!
-          </p>
-        </div>
-      ) : (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
-          {rounds.map((round, idx) => (
+      {/* Recent Rounds Section */}
+      {(() => {
+        const uniqueRounds = (rounds || []).filter((round, index, self) =>
+          index === self.findIndex((r) => (
+            r.id === round.id || (r.courseName === round.courseName && r.totalScore === round.totalScore && r.date === round.date)
+          ))
+        );
+
+        return (
+          <>
+            <div className="flex justify-between items-center mb-3">
+              <h3 className="text-sm font-bold text-gray-400 uppercase tracking-wider">Recent Rounds</h3>
+              {uniqueRounds.length > 0 && (
+                <span className="text-xs font-semibold text-gray-400">{uniqueRounds.length} Total</span>
+              )}
+            </div>
+
+            {uniqueRounds.length === 0 ? (
+              <div className="bg-white p-8 rounded-2xl border-2 border-dashed border-gray-200 text-center">
+                <div className="w-12 h-12 bg-green-50 text-green-700 rounded-full flex items-center justify-center mx-auto text-xl mb-3">
+                  ⛳
+                </div>
+                <h4 className="font-bold text-gray-800 text-base">No Rounds Recorded Yet</h4>
+                <p className="text-xs text-gray-500 mt-1 max-w-xs mx-auto leading-relaxed">
+                  Your recorded scorecards and hole-by-hole shot stats will appear here. Hit "+ Start New Round" to play your first round!
+                </p>
+              </div>
+            ) : (
+              <div className="bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+                {uniqueRounds.map((round, idx) => (
             <div
               key={round.id}
               className={`flex justify-between items-center py-4 px-4 hover:bg-gray-50/70 transition ${
@@ -158,6 +177,9 @@ export default function Dashboard({
           ))}
         </div>
       )}
+      </>
+    );
+  })()}
 
       {/* Edit Round Modal */}
       {editingRound && (

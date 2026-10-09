@@ -10,8 +10,10 @@ import Dashboard from './views/Dashboard';
 import StartRound from './views/StartRound';
 import ActiveHole from './views/ActiveHole';
 import Analysis from './views/Analysis';
+import AnalyticsDashboard from './views/AnalyticsDashboard';
 import SettingsView from './views/SettingsView';
 import { Icons } from './components/Icons';
+import { saveCompletedRound, fetchUserRounds, deleteRound } from './services/roundService';
 
 export default function App() {
   const [currentView, setCurrentView] = useState('dashboard');
@@ -109,6 +111,9 @@ export default function App() {
       setSession(initialSession);
       if (initialSession?.user) {
         fetchProfile(initialSession.user.id);
+        fetchUserRounds(initialSession.user.id).then(userRounds => {
+          if (userRounds && userRounds.length > 0) setRounds(userRounds);
+        });
       }
       setAuthLoading(false);
     }).catch(() => {
@@ -124,6 +129,9 @@ export default function App() {
       if (newSession?.user) {
         setIsGuest(false);
         fetchProfile(newSession.user.id);
+        fetchUserRounds(newSession.user.id).then(userRounds => {
+          if (userRounds && userRounds.length > 0) setRounds(userRounds);
+        });
       } else {
         setUserProfile(null);
       }
@@ -186,21 +194,56 @@ export default function App() {
   };
 
   // Round management
-  const handleUpdateRound = (updatedRound) => {
-    setRounds(prev => prev.map(r => r.id === updatedRound.id ? updatedRound : r));
+  const handleUpdateRound = async (updatedRound) => {
+    const canonicalRound = {
+      ...updatedRound,
+      id: ensureValidUuid(updatedRound.id),
+    };
+    setRounds(prev => {
+      const filtered = prev.filter(r => r.id !== updatedRound.id && r.id !== canonicalRound.id);
+      return [canonicalRound, ...filtered];
+    });
+    if (session?.user?.id) {
+      await saveCompletedRound(canonicalRound, session.user.id);
+      fetchUserRounds(session.user.id).then(setRounds);
+    }
   };
 
-  const handleDeleteRound = (roundId) => {
+  const handleDeleteRound = async (roundId) => {
     setRounds(prev => prev.filter(r => r.id !== roundId));
+    if (session?.user?.id) {
+      deleteRound(roundId, session.user.id);
+    }
     if (analysisId === roundId) {
       navigate('dashboard');
     }
   };
 
-  const handleFinishRound = (completedRound) => {
-    setRounds(prev => [completedRound, ...prev]);
+  const handleFinishRound = async (completedRound) => {
+    const canonicalRound = {
+      ...completedRound,
+      id: ensureValidUuid(completedRound.id),
+    };
+    // 1. Instant local/optimistic update (strictly de-duplicated)
+    setRounds(prev => {
+      const filtered = prev.filter(r =>
+        r.id !== canonicalRound.id &&
+        r.id !== completedRound.id &&
+        !(r.courseName === canonicalRound.courseName && r.totalScore === canonicalRound.totalScore && r.date === canonicalRound.date)
+      );
+      return [canonicalRound, ...filtered];
+    });
     setActiveRound(null);
     navigate('dashboard');
+
+    // 2. Persist to Supabase if authenticated
+    if (session?.user?.id) {
+      const res = await saveCompletedRound(canonicalRound, session.user.id);
+      if (res && res.success) {
+        // Refresh rounds cleanly from database
+        fetchUserRounds(session.user.id).then(setRounds);
+      }
+    }
   };
 
   // Loading screen while checking existing session
@@ -235,6 +278,7 @@ export default function App() {
         session?.user?.app_metadata?.role ||
         'user'
       ).toString().toLowerCase(),
+      status: userProfile?.status || 'active',
     }
     : (isGuest
       ? { ...MOCK_USER }
@@ -250,6 +294,22 @@ export default function App() {
         {/* If not authenticated and not in guest mode, show Auth Screen */}
         {!session && !isGuest ? (
           <AuthView onGuestMode={() => setIsGuest(true)} />
+        ) : currentUser?.status === 'disabled' && currentUser?.role !== 'admin' ? (
+          <div className="p-8 text-center flex flex-col items-center justify-center min-h-[85vh] animate-in fade-in">
+            <div className="w-16 h-16 bg-red-100 text-red-600 rounded-full flex items-center justify-center text-3xl mb-4 shadow-sm">
+              🚫
+            </div>
+            <h2 className="text-xl font-black text-gray-900 mb-2">Account Deactivated</h2>
+            <p className="text-xs text-gray-500 mb-6 leading-relaxed max-w-xs">
+              Your account has been deactivated by an administrator. Please reach out to your club administrator to regain access.
+            </p>
+            <button
+              onClick={handleSignOut}
+              className="bg-gray-900 hover:bg-black text-white font-bold py-3.5 px-8 rounded-xl text-sm transition shadow-md active:scale-95"
+            >
+              Sign Out
+            </button>
+          </div>
         ) : (
           <>
             {/* Router Views */}
@@ -268,6 +328,9 @@ export default function App() {
               <StartRound
                 navigate={navigate}
                 setActiveRound={setActiveRound}
+                currentUser={currentUser}
+                rounds={displayedRounds}
+                isGuest={isGuest}
               />
             )}
             {currentView === 'active' && (
@@ -276,6 +339,7 @@ export default function App() {
                 activeRound={activeRound}
                 setActiveRound={setActiveRound}
                 bag={bag}
+                currentUser={currentUser}
                 onFinishRound={handleFinishRound}
               />
             )}
@@ -287,6 +351,14 @@ export default function App() {
                 rounds={displayedRounds}
                 onDeleteRound={handleDeleteRound}
                 onUpdateRound={handleUpdateRound}
+              />
+            )}
+            {currentView === 'analytics' && (
+              <AnalyticsDashboard
+                navigate={navigate}
+                rounds={displayedRounds}
+                bag={bag}
+                currentUser={currentUser}
               />
             )}
             {currentView === 'settings' && (
@@ -306,7 +378,7 @@ export default function App() {
             )}
 
             {/* Global Floating Action Button */}
-            {(currentView === 'dashboard' || currentView === 'start') && (
+            {(currentView === 'dashboard' || currentView === 'start' || currentView === 'analytics') && (
               <button
                 onClick={() => navigate('settings')}
                 className="fixed bottom-6 right-[calc(50%-10rem)] md:right-[calc(50%-13rem)] w-14 h-14 bg-gray-900 text-white rounded-full flex items-center justify-center shadow-xl border-4 border-white hover:bg-gray-800 transition z-50"
