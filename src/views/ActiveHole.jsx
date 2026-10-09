@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { MOCK_COURSES } from '../data/mockData';
 import { Icons } from '../components/Icons';
 import { useOfflineScore } from '../hooks/useOfflineScore';
-import { getCurrentPosition, getDistanceYards } from '../utils/geo';
+import { getCurrentPosition, getDistanceYards, getBearing, projectDestination } from '../utils/geo';
 import { saveGreenPin, getGreenPin } from '../services/roundService';
 
 // Helper to determine hole metadata
@@ -58,7 +58,8 @@ export default function ActiveHole({
   const [pinnedGreenCoords, setPinnedGreenCoords] = useState(null);
   const [userPinnedCoords, setUserPinnedCoords] = useState(null);
   const [courseGreenCoords, setCourseGreenCoords] = useState(null);
-  const [activePinSource, setActivePinSource] = useState(null); // 'user' | 'course' | null
+  const [projectedGreenCoords, setProjectedGreenCoords] = useState(null);
+  const [activePinSource, setActivePinSource] = useState(null); // 'user' | 'course' | 'projected' | null
 
   // Edit / End Round Modal
   const [editingShotId, setEditingShotId] = useState(null);
@@ -83,6 +84,29 @@ export default function ActiveHole({
     activeRound,
     currentUser?.id
   );
+
+  // Dynamic Scorecard Countdown & Relative Green Distance
+  const totalShotYards = (scores.shots || []).reduce(
+    (sum, s) => sum + (Number(s.distance) || 0),
+    0
+  );
+  const estimatedRemaining = Math.max(0, holeData.distance - totalShotYards);
+
+  const displayDistance = liveGreenDistance !== null
+    ? liveGreenDistance
+    : totalShotYards > 0
+    ? estimatedRemaining
+    : holeData.distance;
+
+  const displaySubtitle = liveGreenDistance !== null
+    ? activePinSource === 'user'
+      ? 'Yds to Center (My Marker GPS)'
+      : activePinSource === 'course'
+      ? 'Yds to Center (Course GPS)'
+      : 'Yds to Green (Fairway GPS Projected)'
+    : totalShotYards > 0
+    ? `Est. Yds to Green (${holeData.distance}y - ${totalShotYards}y played)`
+    : 'Yds to Center (Scorecard)';
 
   // Load any pinned green coordinates for this hole from localStorage + course metadata + cloud DB
   const greenPinStorageKey = `green_pin_${course.id}_h${currentHole}`;
@@ -169,6 +193,7 @@ export default function ActiveHole({
       setUserPinnedCoords(coords);
       setActivePinSource('user');
       setPinnedGreenCoords(coords);
+      setProjectedGreenCoords(null);
       saveGreenPin(course.id, currentHole, coords, currentUser?.id);
       setLiveGreenDistance(0);
     } catch (err) {
@@ -187,6 +212,9 @@ export default function ActiveHole({
     if (courseGreenCoords) {
       setActivePinSource('course');
       setPinnedGreenCoords(courseGreenCoords);
+    } else if (projectedGreenCoords) {
+      setActivePinSource('projected');
+      setPinnedGreenCoords(projectedGreenCoords);
     } else {
       setActivePinSource(null);
       setPinnedGreenCoords(null);
@@ -229,6 +257,28 @@ export default function ActiveHole({
       } else if (!shotDistance) {
         setShotDistance('0');
       }
+
+      // Fairway Vector Projection: If no ground pin exists and shot is >= 30y, project green from tee
+      if (yards >= 30 && !userPinnedCoords && !courseGreenCoords) {
+        const bearing = getBearing(startShotCoords.lat, startShotCoords.lng, currentPos.lat, currentPos.lng);
+        const projected = projectDestination(startShotCoords.lat, startShotCoords.lng, holeData.distance, bearing);
+        if (projected) {
+          setProjectedGreenCoords(projected);
+          setPinnedGreenCoords(projected);
+          setActivePinSource('projected');
+          const distToGreen = getDistanceYards(currentPos.lat, currentPos.lng, projected.lat, projected.lng);
+          if (distToGreen > 0) {
+            setLiveGreenDistance(distToGreen);
+          }
+        }
+      } else if (pinnedGreenCoords) {
+        // If we already have a pin (user, course, or projected), update approach distance from new ball spot
+        const distToGreen = getDistanceYards(currentPos.lat, currentPos.lng, pinnedGreenCoords.lat, pinnedGreenCoords.lng);
+        if (distToGreen > 0) {
+          setLiveGreenDistance(distToGreen);
+        }
+      }
+
       setIsGpsTracking(false);
       // Auto-prime this spot as the starting lie for next shot!
       setStartShotCoords({ lat: currentPos.lat, lng: currentPos.lng, time: Date.now() });
@@ -255,12 +305,14 @@ export default function ActiveHole({
       setShotDistance('');
       setIsGpsTracking(false);
       setStartShotCoords(null);
+      setProjectedGreenCoords(null);
       setGpsError('');
       window.scrollTo(0, 0);
     } else {
       setShowEndModal(true);
       setActivePinSource(null);
       setPinnedGreenCoords(null);
+      setProjectedGreenCoords(null);
     }
     setLiveGreenDistance(null);
   };
@@ -346,14 +398,10 @@ export default function ActiveHole({
         {/* Big Hero Distance */}
         <div className="my-2">
           <h2 className="text-7xl font-black tracking-tighter">
-            {liveGreenDistance !== null ? liveGreenDistance : holeData.distance}
+            {displayDistance}
           </h2>
           <p className="text-xs font-semibold opacity-80 mt-1 uppercase tracking-[0.2em]">
-            {liveGreenDistance !== null
-              ? activePinSource === 'user'
-                ? 'Yds to Center (My Marker GPS)'
-                : 'Yds to Center (Course GPS)'
-              : 'Yds to Center (Scorecard)'}
+            {displaySubtitle}
           </p>
         </div>
 
@@ -403,17 +451,30 @@ export default function ActiveHole({
                   className="text-xs font-bold bg-green-900/60 hover:bg-green-900 text-green-200 px-3 py-1.5 rounded-full flex items-center gap-1 transition active:scale-95"
                 >
                   <Icons.MapPin />
-                  {userPinnedCoords ? 'Re-pin' : 'Overrule Pin'}
+                  {activePinSource === 'projected' ? '📍 Pin Real Green' : userPinnedCoords ? 'Re-pin' : 'Overrule Pin'}
                 </button>
-                {userPinnedCoords && (
+                {activePinSource === 'projected' ? (
+                  <button
+                    onClick={() => {
+                      setProjectedGreenCoords(null);
+                      setPinnedGreenCoords(null);
+                      setActivePinSource(null);
+                      setLiveGreenDistance(null);
+                    }}
+                    title="Clear projected green"
+                    className="text-xs font-bold bg-red-900/50 hover:bg-red-900/80 text-red-200 px-3 py-1.5 rounded-full flex items-center gap-1 transition active:scale-95"
+                  >
+                    ✕ Reset
+                  </button>
+                ) : userPinnedCoords ? (
                   <button
                     onClick={handleResetGreenPin}
-                    title="Remove custom marker and revert to course data"
+                    title="Remove custom marker and revert"
                     className="text-xs font-bold bg-red-900/50 hover:bg-red-900/80 text-red-200 px-3 py-1.5 rounded-full flex items-center gap-1 transition active:scale-95"
                   >
                     ✕ Reset Pin
                   </button>
-                )}
+                ) : null}
               </>
             ) : (
               <button
@@ -431,7 +492,11 @@ export default function ActiveHole({
               ? '✓ Using your custom marker. Tap "Live GPS to Green" on approach, "Re-pin", or "Reset Pin".'
               : activePinSource === 'course'
               ? '🏛️ Using official course data. Tap "Live GPS to Green" or stand on green to overrule.'
-              : '💡 Scorecard yardage shown. Stand on the green center and tap to permanently save GPS coords for live approach distance.'}
+              : activePinSource === 'projected'
+              ? '🎯 Projected from tee drive direction. Tap "Live GPS to Green" on approach, or "Pin Real Green" when at the flag.'
+              : totalShotYards > 0
+              ? `💡 Scorecard countdown active (${estimatedRemaining}y remaining from ${totalShotYards}y logged). Use 📍 Mark Lie on tee to project GPS, or pin green directly.`
+              : '💡 Scorecard yardage shown. Log shots to count down, use 📍 Mark Lie on tee to project fairway, or pin green directly.'}
           </p>
         </div>
       </div>

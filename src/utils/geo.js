@@ -92,3 +92,50 @@ export function getCurrentPosition(options = {}) {
     );
   });
 }
+
+/**
+ * Calculates initial compass bearing in degrees (0..360) from point 1 to point 2
+ */
+export function getBearing(lat1, lon1, lat2, lon2) {
+  if (!lat1 || !lon1 || !lat2 || !lon2) return 0;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const rLat1 = (lat1 * Math.PI) / 180;
+  const rLat2 = (lat2 * Math.PI) / 180;
+
+  const y = Math.sin(dLon) * Math.cos(rLat2);
+  const x =
+    Math.cos(rLat1) * Math.sin(rLat2) -
+    Math.sin(rLat1) * Math.cos(rLat2) * Math.cos(dLon);
+
+  const initialBearingRad = Math.atan2(y, x);
+  return ((initialBearingRad * 180) / Math.PI + 360) % 360;
+}
+
+/**
+ * Projects a destination coordinate given a starting lat/lng, distance in yards, and bearing in degrees
+ */
+export function projectDestination(lat1, lon1, distanceYards, bearingDegrees) {
+  if (!lat1 || !lon1 || !distanceYards) return null;
+  const distanceMeters = distanceYards / METERS_TO_YARDS;
+  const angularDistance = distanceMeters / EARTH_RADIUS_METERS;
+  const bearingRad = (bearingDegrees * Math.PI) / 180;
+  const rLat1 = (lat1 * Math.PI) / 180;
+  const rLon1 = (lon1 * Math.PI) / 180;
+
+  const rLat2 = Math.asin(
+    Math.sin(rLat1) * Math.cos(angularDistance) +
+    Math.cos(rLat1) * Math.sin(angularDistance) * Math.cos(bearingRad)
+  );
+
+  const rLon2 =
+    rLon1 +
+    Math.atan2(
+      Math.sin(bearingRad) * Math.sin(angularDistance) * Math.cos(rLat1),
+      Math.cos(angularDistance) - Math.sin(rLat1) * Math.sin(rLat2)
+    );
+
+  return {
+    lat: (rLat2 * 180) / Math.PI,
+    lng: (((rLon2 * 180) / Math.PI + 540) % 360) - 180,
+  };
+}
