@@ -194,13 +194,6 @@ export default function ActiveHole({
     setLiveGreenDistance(null);
   };
 
-  // Test simulator to test ball distance increments without physically moving
-  const handleSimulateWalk = (addedYards = 150) => {
-    const current = parseInt(shotDistance) || 0;
-    const nextVal = current === 0 ? addedYards : current + 25;
-    setShotDistance(nextVal.toString());
-  };
-
   // 1. Mark Lie (Tee or Ball position) - 1 instantaneous GPS fix, NO battery drain while walking
   const handleMarkLie = async () => {
     setGpsLoading(true);
@@ -230,7 +223,7 @@ export default function ActiveHole({
         currentPos.lat,
         currentPos.lng
       );
-      // Auto-populate distance if moved, or retain manual/simulated input
+      // Auto-populate distance if moved, or retain manual input
       if (yards > 0) {
         setShotDistance(yards.toString());
       } else if (!shotDistance) {
@@ -266,8 +259,12 @@ export default function ActiveHole({
       window.scrollTo(0, 0);
     } else {
       setShowEndModal(true);
+      setActivePinSource(null);
+      setPinnedGreenCoords(null);
     }
+    setLiveGreenDistance(null);
   };
+
 
   // Collect all holes played so far when finishing round
   const handleSaveAndCompleteRound = () => {
@@ -458,13 +455,13 @@ export default function ActiveHole({
           <option value="">Select a Club (Optional)...</option>
           {bag.map(c => (
             <option key={c.id} value={c.name}>
-              {c.name} ({c.carry}y target)
+              {c.name}
             </option>
           ))}
         </select>
 
-        {/* Club Swing & Stance Cues */}
-        {clubData && (
+        {/* Club Swing & Stance Cues (only shown when notes/cues exist) */}
+        {clubData && (clubData.swing?.trim() || clubData.stance?.trim()) && (
           <div className="bg-blue-50 p-3.5 rounded-xl border border-blue-100 mb-3 animate-in fade-in">
             {clubData.swing && (
               <>
@@ -532,19 +529,11 @@ export default function ActiveHole({
             <div className="bg-green-50 border border-green-200 text-green-900 text-xs p-3 rounded-xl flex flex-col items-center gap-1.5 animate-in fade-in">
               <div className="flex items-center gap-2 font-bold">
                 <span className="w-2.5 h-2.5 rounded-full bg-green-600"></span>
-                <span>Lie 1 Pinned! Zero battery drain while walking</span>
+                <span>Lie 1 Pinned!</span>
               </div>
               <p className="text-[11px] text-gray-600 text-center leading-tight">
                 Walk to your ball and tap <strong>"🎯 At Ball (Get Dist)"</strong> to compute the exact yardage from your lie.
               </p>
-              {/* Off-course / desktop simulator button so user can test right now */}
-              <button
-                type="button"
-                onClick={() => handleSimulateWalk(180)}
-                className="mt-1 bg-white hover:bg-green-100 text-green-800 border border-green-300 px-3 py-1 rounded-lg text-[11px] font-bold shadow-xs transition active:scale-95 flex items-center gap-1"
-              >
-                🧪 Simulate Ball (+180 yds)
-              </button>
             </div>
           )}
 
@@ -552,7 +541,7 @@ export default function ActiveHole({
             onClick={handleRecordShot}
             className="w-full bg-gray-900 text-white font-bold py-3.5 rounded-xl hover:bg-black active:scale-95 transition"
           >
-            + Record {selectedClub || 'Shot'}
+            + Record Shot
           </button>
         </div>
       </div>
